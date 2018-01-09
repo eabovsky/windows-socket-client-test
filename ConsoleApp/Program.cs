@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics;
 using Quobject.SocketIoClientDotNet.Client;
 
 
@@ -22,6 +23,10 @@ namespace ConsoleApp
             .On(Socket.EVENT_DISCONNECT, () =>
             {
                 Console.WriteLine("Disconnected");
+            })            
+            .On(Socket.EVENT_CONNECT_ERROR, data =>
+            {
+                Console.WriteLine($"Connect Error: {data}");
             })
             .On(Socket.EVENT_ERROR, data =>
             {
