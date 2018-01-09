@@ -3,6 +3,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Diagnostics;
 using SuperSocket.ClientEngine;
 
 namespace SuperSocket.ClientEngine.Proxy
@@ -71,6 +72,8 @@ namespace SuperSocket.ClientEngine.Proxy
 
         protected override void ProcessConnect(Socket socket, object targetEndPoint, SocketAsyncEventArgs e, Exception exception)
         {
+            Debug.WriteLine("ProxyConnect - attempting to connect to proxy");
+
             if (exception != null)
             {
                 OnException(exception);
@@ -166,6 +169,9 @@ namespace SuperSocket.ClientEngine.Proxy
 
             if (string.IsNullOrEmpty(line))
             {
+
+                Debug.WriteLine("Proxy: Null String");
+
                 OnException("protocol error: invalid response");
                 return;
             }
@@ -175,6 +181,7 @@ namespace SuperSocket.ClientEngine.Proxy
 
             if (pos <= 0 || line.Length <= (pos + 2))
             {
+                Debug.WriteLine("Proxy: protocol error invalid response");
                 OnException("protocol error: invalid response");
                 return;
             }
@@ -183,6 +190,7 @@ namespace SuperSocket.ClientEngine.Proxy
 
             if (!m_ResponsePrefix.Equals(httpProtocol))
             {
+                Debug.WriteLine("Proxy: protocol error invalid protocol");
                 OnException("protocol error: invalid protocol");
                 return;
             }
@@ -191,6 +199,7 @@ namespace SuperSocket.ClientEngine.Proxy
 
             if (statusPos < 0)
             {
+                Debug.WriteLine("Proxy: protocol error invalid response statusPos < 0");
                 OnException("protocol error: invalid response");
                 return;
             }
@@ -199,6 +208,9 @@ namespace SuperSocket.ClientEngine.Proxy
             //Status code should be 2**
             if (!int.TryParse(line.Substring(pos + 1, statusPos - pos - 1), out statusCode) || (statusCode > 299 || statusCode < 200))
             {
+                Debug.WriteLine("Proxy server refused connection. Full Response:");
+                Debug.WriteLine(line);
+                Debug.WriteLine(lineReader.ReadToEnd());
                 OnException("the proxy server refused the connection");
                 return;
             }
