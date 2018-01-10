@@ -5,6 +5,9 @@ using System.Net.Sockets;
 using System.Text;
 using System.Diagnostics;
 using SuperSocket.ClientEngine;
+using NSspi;
+using NSspi.Contexts;
+using NSspi.Credentials;
 
 namespace SuperSocket.ClientEngine.Proxy
 {
@@ -17,10 +20,27 @@ namespace SuperSocket.ClientEngine.Proxy
             public SearchMarkState<byte> SearchState { get; set; }
         }
 
+        private string NTLMToken = "";
+        private string NTLMChallangeToken = "";
+
         private const string m_RequestTemplate = "CONNECT {0}:{1} HTTP/1.1\r\nHost: {0}:{1}\r\nProxy-Connection: Keep-Alive\r\n\r\n";
+        private const string m_NTLMRequestTemplate = "CONNECT {0}:{1} HTTP/1.1\r\nHost: {0}:{1}\r\nproxy-Authorization: NTLM {2}\r\nProxy-Connection: Keep-Alive\r\n\r\n";
+
 
         private const string m_ResponsePrefix = "HTTP/1.1";
         private const char m_Space = ' ';
+        private EndPoint lastEndpoint;
+
+        private byte[] NTLMClientToken = null;
+        private byte[] serverToken = null;
+
+        private ClientCurrentCredential NSSPIclientCred;
+        private SecurityStatus NSSPIclientStatus;
+        private ClientContext NSSPIclient;
+        private bool NSSPIInitiated = false;
+
+
+
 
         private static byte[] m_LineSeparator;
 
@@ -35,6 +55,58 @@ namespace SuperSocket.ClientEngine.Proxy
             : this(proxyEndPoint, 8192, null)
         {
 
+        }
+        private void initNTLMClientAuth()
+        {
+            //singleton init
+            if (NSSPIInitiated)
+            {
+                return;
+            }
+
+            var packageName = "NTLM";
+            NSSPIclientCred = new ClientCurrentCredential(packageName);
+
+            Debug.WriteLine("NSSPI Client Auth Principle: " + NSSPIclientCred.PrincipleName);
+
+            byte[] NTLMClientToken = null;
+            byte[] serverToken = null;
+            
+            NSSPIclient = new ClientContext(
+                    NSSPIclientCred,
+                    NSSPIclientCred.PrincipleName,
+                    ContextAttrib.MutualAuth |
+                    ContextAttrib.InitIdentify |
+                    ContextAttrib.Confidentiality |
+                    ContextAttrib.ReplayDetect |
+                    ContextAttrib.SequenceDetect |
+                    ContextAttrib.Connection |
+                    ContextAttrib.Delegate
+                );
+
+            NSSPIInitiated = true;
+        }
+
+        private void setNTLMToken()
+        {
+            initNTLMClientAuth();
+
+            if (NTLMChallangeToken != "")
+            {
+                serverToken = Convert.FromBase64String(NTLMChallangeToken);
+                Debug.WriteLine("NTLM Challange token detected. Setting server token: " + NTLMChallangeToken);
+            }
+
+            //while (true)
+            //{
+            NSSPIclientStatus = NSSPIclient.Init(serverToken, out NTLMClientToken);
+            Debug.WriteLine("NSSPI ClientStatus: " + NSSPIclientStatus.ToString());
+                //if (clientStatus != SecurityStatus.ContinueNeeded) { break; }
+            //}
+            
+            //
+            this.NTLMToken = Convert.ToBase64String(NTLMClientToken);
+            Debug.WriteLine("NTLMToken: " + this.NTLMToken);
         }
 
         public HttpConnectProxy(EndPoint proxyEndPoint, string targetHostName)
@@ -62,6 +134,8 @@ namespace SuperSocket.ClientEngine.Proxy
 
             try
             {
+                //save reference to remote endpoint if we need to do back-and-forth connecting
+                lastEndpoint = remoteEndPoint;
                 ProxyEndPoint.ConnectAsync(null, ProcessConnect, remoteEndPoint);
             }
             catch (Exception e)
@@ -95,19 +169,25 @@ namespace SuperSocket.ClientEngine.Proxy
             if (e == null)
                 e = new SocketAsyncEventArgs();
 
+            setNTLMToken();
+
             string request;
             if (targetEndPoint is DnsEndPoint)
             {
                 var targetDnsEndPoint = (DnsEndPoint)targetEndPoint;
-                request = string.Format(m_RequestTemplate, targetDnsEndPoint.Host, targetDnsEndPoint.Port);
+                request = string.Format(m_NTLMRequestTemplate, targetDnsEndPoint.Host, targetDnsEndPoint.Port, NTLMToken);
             }
             else
             {
                 var targetIPEndPoint = (IPEndPoint)targetEndPoint;
-                request = string.Format(m_RequestTemplate, targetIPEndPoint.Address, targetIPEndPoint.Port);
+                request = string.Format(m_NTLMRequestTemplate, targetIPEndPoint.Address, targetIPEndPoint.Port, NTLMToken);
             }
 
+            Debug.WriteLine("PROXY Request:--------------\r\n" + request);
+
             var requestData = ASCIIEncoding.GetBytes(request);
+
+            Debug.WriteLine("----------------------------\r\n" + request);
 
             e.Completed += AsyncEventArgsCompleted;
             e.UserToken = new ConnectContext { Socket = socket, SearchState = new SearchMarkState<byte>(m_LineSeparator) };
@@ -208,11 +288,42 @@ namespace SuperSocket.ClientEngine.Proxy
             //Status code should be 2**
             if (!int.TryParse(line.Substring(pos + 1, statusPos - pos - 1), out statusCode) || (statusCode > 299 || statusCode < 200))
             {
-                Debug.WriteLine("Proxy server refused connection. Full Response:");
-                Debug.WriteLine(line);
-                Debug.WriteLine(lineReader.ReadToEnd());
-                OnException("the proxy server refused the connection");
-                return;
+
+                if (statusCode == 407)
+                {
+                    Debug.WriteLine("Proxy server requires authentication. Response:");
+                    Debug.WriteLine(line);
+                    while ((line = lineReader.ReadLine()) != null)
+                    {
+                        Debug.WriteLine(line);
+                        var headerParts = line.Split();
+                        if (headerParts[0] == "Proxy-Authenticate:" && headerParts[1] == "NTLM" && headerParts.Length == 3)
+                        {
+                            Debug.WriteLine("Proxy-Authenticate challange response found. Auth Protocol: " + headerParts[1]);
+                            Debug.WriteLine("Challange Token: " + headerParts[2]);
+                            NTLMChallangeToken = headerParts[2];
+
+                            Connect(lastEndpoint);
+
+                            break;
+
+                        }
+                    }
+
+                   
+
+                    return;
+
+                } else
+                {
+                    Debug.WriteLine("Proxy server refused connection. Full Response:");
+                    Debug.WriteLine(line);
+                    Debug.WriteLine(lineReader.ReadToEnd());
+                    OnException("the proxy server refused the connection");
+                    return;
+                }
+
+                
             }
 
             OnCompleted(new ProxyEventArgs(context.Socket, TargetHostHame));
