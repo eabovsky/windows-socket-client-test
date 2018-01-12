@@ -73,7 +73,7 @@ namespace Quobject.EngineIoClientDotNet.Client.Transports
                 log.Info($"proxyUrl = {proxyUrl}");
                 log.Info($"destUrl.Host = {destUrl.Host}");
 
-                var proxy = new HttpConnectProxy(new DnsEndPoint(proxyUrl.Host, proxyUrl.Port), destUrl.Host);
+                var proxy = new HttpConnectProxy(new DnsEndPoint(proxyUrl.Host, proxyUrl.Port), destUrl.Host, proxyUrl.Host);
                 ws.Proxy = proxy;
             }
             ws.Open();

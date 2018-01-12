@@ -8,6 +8,7 @@ using SuperSocket.ClientEngine;
 using NSspi;
 using NSspi.Contexts;
 using NSspi.Credentials;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace SuperSocket.ClientEngine.Proxy
@@ -21,6 +22,8 @@ namespace SuperSocket.ClientEngine.Proxy
             public SearchMarkState<byte> SearchState { get; set; }
         }
 
+        
+
         private string NTLMToken = "";
         private string NTLMChallangeToken = "";
 
@@ -29,22 +32,22 @@ namespace SuperSocket.ClientEngine.Proxy
 
         private bool authNeeded = false;
 
-        private string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.132 Safari/537.36";
+        private string userAgent = "ScreenMeet Windows Support Client";
 
         private const string m_ResponsePrefix = "HTTP/1.1";
         private const char m_Space = ' ';
         private EndPoint lastEndpoint;
 
+        private string ProxyHostName = null;
+
         private byte[] NTLMClientToken = null;
         private byte[] serverToken = null;
-
         private ClientCurrentCredential NSSPIclientCred;
         private SecurityStatus NSSPIclientStatus;
         private ClientContext NSSPIclient;
         private bool NSSPIInitiated = false;
-
-
-
+        private string ProxyViaHeader = null;
+        private bool isProxyHostname = false;
 
         private static byte[] m_LineSeparator;
 
@@ -55,11 +58,17 @@ namespace SuperSocket.ClientEngine.Proxy
 
         private int m_ReceiveBufferSize;
 
+        /*
+         * 
+         * 
         public HttpConnectProxy(EndPoint proxyEndPoint)
             : this(proxyEndPoint, 8192, null)
         {
 
         }
+
+        */
+
         private void initNTLMClientAuth()
         {
             //singleton init
@@ -68,7 +77,11 @@ namespace SuperSocket.ClientEngine.Proxy
                 return;
             }
 
-            var packageName = "NTLM";
+           // IPHostEntry iplookup = Dns.GetHostEntry("100.0.0.54");
+
+            //ProxySPN = iplookup.HostName;
+
+            var packageName = "Negotiate";
             NSSPIclientCred = new ClientCurrentCredential(packageName);
 
             Debug.WriteLine("NSSPI Client Auth Principle: " + NSSPIclientCred.PrincipleName);
@@ -77,18 +90,38 @@ namespace SuperSocket.ClientEngine.Proxy
             byte[] serverToken = null;
             
             NSSPIclient = new ClientContext(
-                    NSSPIclientCred,
-                    "HTTP/127.0.0.1", 
-                    ContextAttrib.MutualAuth |
-                    //ContextAttrib.InitIdentify |
-                    //ContextAttrib.Confidentiality |
-                    ContextAttrib.ReplayDetect |
-                    ContextAttrib.SequenceDetect |
-                    ContextAttrib.Connection |
-                    ContextAttrib.Delegate
-                );
-
+                NSSPIclientCred,
+                getBestSPNGuess(),//this is the SPN which is apparently very important. Needs to either be the machine name of the remote resource, or be in the format of HTTP/<hostname> - ip's don't work
+                ContextAttrib.MutualAuth |
+                //ContextAttrib.InitIdentify |
+                //ContextAttrib.Confidentiality |
+                ContextAttrib.ReplayDetect |
+                ContextAttrib.SequenceDetect |
+                ContextAttrib.Connection |
+                ContextAttrib.Delegate
+            );
+            
             NSSPIInitiated = true;
+        }
+
+
+        //@todo: use better strategies to determine the SPN
+        private string getBestSPNGuess()
+        {
+
+            if (isProxyHostname)
+            {
+                return "HTTP/" + ProxyHostName;
+            } else if (ProxyViaHeader != null)
+            {
+                return ProxyViaHeader;
+            } else
+            {
+                return "HTTP/" + ProxyHostName;
+            }
+
+            
+
         }
 
         private void setNTLMToken()
@@ -101,28 +134,23 @@ namespace SuperSocket.ClientEngine.Proxy
                 
                 Debug.WriteLine("NTLM Challange token detected. Setting server token: " + NTLMChallangeToken);
             }
-
-            //while (true)
-            //{
-            NSSPIclientStatus = NSSPIclient.Init(serverToken, out NTLMClientToken);
-            Debug.WriteLine("NSSPI ClientStatus: " + NSSPIclientStatus.ToString());
-                //if (clientStatus != SecurityStatus.ContinueNeeded) { break; }
-            //}
             
-            //
+            NSSPIclientStatus = NSSPIclient.Init(serverToken, out NTLMClientToken);
+          
             this.NTLMToken = Convert.ToBase64String(NTLMClientToken);
-            Debug.WriteLine("NTLMToken: " + this.NTLMToken);
+            
         }
 
-        public HttpConnectProxy(EndPoint proxyEndPoint, string targetHostName)
-            : this(proxyEndPoint, 8192, targetHostName)
+        public HttpConnectProxy(EndPoint proxyEndPoint, string targetHostName, string proxyHostName)
+            : this(proxyEndPoint, 8192, targetHostName, proxyHostName)
         {
         }
 
-        public HttpConnectProxy(EndPoint proxyEndPoint, int receiveBufferSize, string targetHostName)
+        public HttpConnectProxy(EndPoint proxyEndPoint, int receiveBufferSize, string targetHostName, string proxyHostName)
             : base(proxyEndPoint, targetHostName)
         {
             m_ReceiveBufferSize = receiveBufferSize;
+            ProxyHostName = proxyHostName;
         }
 
         public override void Connect(EndPoint remoteEndPoint)
@@ -135,6 +163,19 @@ namespace SuperSocket.ClientEngine.Proxy
             if (!(remoteEndPoint is IPEndPoint || remoteEndPoint is DnsEndPoint))
             {
                 throw new ArgumentException("remoteEndPoint must be IPEndPoint or DnsEndPoint", "remoteEndPoint");
+            }
+
+            //check if our hostname matches an ip address or not
+            Match isProxyIpAddress = Regex.Match(ProxyHostName, @"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}");
+
+            Debug.WriteLine("Connecting to proxy endpoint: " + ProxyHostName);
+
+            if (isProxyIpAddress.Success)
+            {
+                Debug.WriteLine("***Proxy endpoint is IP endpoint");
+            } else { 
+                Debug.WriteLine("***Proxy endpoint is a hostname/DNS endpoint");
+                isProxyHostname = true;
             }
 
             try
@@ -200,7 +241,7 @@ namespace SuperSocket.ClientEngine.Proxy
                 request = string.Format(m_NTLMRequestTemplate, targetIPEndPoint.Address, targetIPEndPoint.Port, NTLMToken);
             }
 
-            Debug.WriteLine("PROXY Request:--------------\r\n" + request);
+            Debug.WriteLine("PROXY Request:\r\n----------------------------\r\n" + request);
 
             var requestData = ASCIIEncoding.GetBytes(request);
 
@@ -310,7 +351,29 @@ namespace SuperSocket.ClientEngine.Proxy
                 {
                     if (!authNeeded)
                     {
-                        authNeeded = true;
+                        authNeeded = true; //flips the flag that we need to authenticate
+
+                        Debug.WriteLine("Proxy authentication required");
+                        Debug.WriteLine("Response:\r\n----------------------------------\r\n");
+
+                        //Possible strategy to determine the proxy SPN is to use the via header
+
+                        while ((line = lineReader.ReadLine()) != null)
+                        {
+                            Debug.WriteLine(line);
+                            var headerParts = line.Split();
+                            if (headerParts[0] == "Via:" && headerParts.Length == 3)
+                            {
+                                
+                                Debug.WriteLine("*** Proxy Via header found. SPN Value: " + headerParts[2]);
+                                ProxyViaHeader = headerParts[2];
+                                
+                            }
+                        }
+
+                        Debug.WriteLine("----------------------------------\r\n");
+
+
                         Connect(lastEndpoint);
                         return;
                     }
@@ -320,11 +383,11 @@ namespace SuperSocket.ClientEngine.Proxy
                     while ((line = lineReader.ReadLine()) != null)
                     {
                         Debug.WriteLine(line);
-                        var headerParts = line.Split();
+                        var headerParts = line.Split(); //@todo: this should work with Negotiate, NTLM, or Kerberos, should prefer Negotiate, fall back to NTLM/Kerberos
                         if (headerParts[0] == "Proxy-Authenticate:" && headerParts[1] == "Negotiate" && headerParts.Length == 3)
                         {
-                            Debug.WriteLine("Proxy-Authenticate challange response found. Auth Protocol: " + headerParts[1]);
-                            Debug.WriteLine("Challange Token: " + headerParts[2]);
+                            Debug.WriteLine("*** Proxy-Authenticate Negotiate response found. Auth Protocol: " + headerParts[1]);
+                            Debug.WriteLine("*** Challange Token: " + headerParts[2]);
                             NTLMChallangeToken = headerParts[2];
 
                             //Thread.Sleep(5000);
@@ -334,10 +397,13 @@ namespace SuperSocket.ClientEngine.Proxy
                             break;
 
                         }
+
+                       
+
                     }
 
-                   
-
+                    OnException("Proxy authentication failed - did not find challange token.");
+                    
                     return;
 
                 } else
