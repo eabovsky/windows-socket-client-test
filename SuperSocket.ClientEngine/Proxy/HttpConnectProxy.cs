@@ -333,6 +333,7 @@ namespace SuperSocket.ClientEngine.Proxy
 
                     //we chose our preferred auth strategy and set it for the connector class
                     SecPackageName = proxyResponse.SecurityPackage;
+                    ProxyViaHeader = proxyResponse.Via;
 
                     //create the nsspi token
                     var success = createNSSPIToken();
@@ -366,6 +367,9 @@ namespace SuperSocket.ClientEngine.Proxy
                    
                     return;
                 }
+
+                OnException("Unknown proxy state - unexpected error");
+                return;
 
             } else
             {
