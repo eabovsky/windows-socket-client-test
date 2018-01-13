@@ -10,6 +10,7 @@ using NSspi.Contexts;
 using NSspi.Credentials;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Collections;
 
 namespace SuperSocket.ClientEngine.Proxy
 {
@@ -21,29 +22,28 @@ namespace SuperSocket.ClientEngine.Proxy
 
             public SearchMarkState<byte> SearchState { get; set; }
         }
-
         
 
-        private string NTLMToken = "";
-        private string NTLMChallangeToken = "";
+        private Hashtable supportedSecPackages = new Hashtable();
+        //private HTTPProxyResponseHeader ProxyResponse;
+        
+        private string AuthToken = "";
+        private string ChallangeToken = "";
 
         private const string m_RequestTemplate = "CONNECT {0}:{1} HTTP/1.1\r\nUser-Agent: {2}\r\nHost: {0}:{1}\r\nProxy-Connection: Keep-Alive\r\n\r\n";
         private const string m_NTLMRequestTemplate = "CONNECT {0}:{1} HTTP/1.1\r\nUser-Agent: {3}\r\nHost: {0}:{1}\r\nProxy-Authorization: {4} {2}\r\nProxy-Connection: Keep-Alive\r\n\r\n";
 
-        private bool authNeeded = false;
-
         private string userAgent = "ScreenMeet Windows Support Client";
 
-        private const string m_ResponsePrefix = "HTTP/1.1";
-        private const char m_Space = ' ';
+        
         private EndPoint lastEndpoint;
 
         private string ProxyHostName = null;
         private Socket currentSocket;
 
-        private string SecPackageName = "NTLM";
-        private byte[] NTLMClientToken = null;
-        private byte[] serverToken = null;
+        private string SecPackageName = null;
+        private byte[] NSSPIClientToken = null;
+        private byte[] NSSPIChallangeToken = null;
         private ClientCurrentCredential NSSPIclientCred;
         private SecurityStatus NSSPIclientStatus;
         private ClientContext NSSPIclient;
@@ -59,30 +59,26 @@ namespace SuperSocket.ClientEngine.Proxy
         }
 
         private int m_ReceiveBufferSize;
-
-        private void initNTLMClientAuth()
+        
+        private void initNSSPI()
         {
-            //singleton init
+            //singleton init for NSSPI API
             if (NSSPIInitiated)
             {
                 return;
             }
-
-           // IPHostEntry iplookup = Dns.GetHostEntry("100.0.0.54");
-
-            //ProxySPN = iplookup.HostName;
 
             var packageName = SecPackageName;
             NSSPIclientCred = new ClientCurrentCredential(packageName);
 
             Debug.WriteLine("NSSPI Client Auth Principle: " + NSSPIclientCred.PrincipleName);
 
-            byte[] NTLMClientToken = null;
-            byte[] serverToken = null;
+            byte[] NSSPIClientToken = null;
+            byte[] NSSPIChallangeToken = null;
             
             NSSPIclient = new ClientContext(
                 NSSPIclientCred,
-                getBestSPNGuess(),//this is the SPN which is apparently very important. Needs to either be the machine name of the remote resource, or be in the format of HTTP/<hostname> - ip's don't work
+                getBestSPNGuess(),//this is the SPN which is required in case we are using Kerberos. Needs to either be the machine name of the remote resource, or be in the format of HTTP/<hostname> - ip's don't work
                 ContextAttrib.MutualAuth |
                 //ContextAttrib.InitIdentify |
                 //ContextAttrib.Confidentiality |
@@ -115,20 +111,30 @@ namespace SuperSocket.ClientEngine.Proxy
 
         }
 
-        private void setNTLMToken()
+        private bool createNSSPIToken()
         {
-            initNTLMClientAuth();
-
-            if (NTLMChallangeToken != "")
+            try
             {
-                serverToken = Convert.FromBase64String(NTLMChallangeToken);
-                
-                Debug.WriteLine("NTLM Challange token detected. Setting server token: " + NTLMChallangeToken);
+
+                initNSSPI();
+
+                if (ChallangeToken != "")
+                {
+                    NSSPIChallangeToken = Convert.FromBase64String(ChallangeToken);
+
+                    Debug.WriteLine("[NSSPI] NTLM Challange token detected. Setting as server token: " + ChallangeToken);
+                }
+
+                NSSPIclientStatus = NSSPIclient.Init(NSSPIChallangeToken, out NSSPIClientToken);
+
+                this.AuthToken = Convert.ToBase64String(NSSPIClientToken);
+
+                return true;
+            } catch (Exception e)
+            {
+                OnException("Failed to perform NSSPI Authentication while connecting to proxy. " +e.ToString());
+                return false;
             }
-            
-            NSSPIclientStatus = NSSPIclient.Init(serverToken, out NTLMClientToken);
-          
-            this.NTLMToken = Convert.ToBase64String(NTLMClientToken);
             
         }
 
@@ -159,13 +165,13 @@ namespace SuperSocket.ClientEngine.Proxy
             //check if our hostname matches an ip address or not
             Match isProxyIpAddress = Regex.Match(ProxyHostName, @"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}");
 
-            Debug.WriteLine("Connecting to proxy endpoint: " + ProxyHostName);
+            Debug.WriteLine("[PROXY] Connecting to proxy: " + ProxyHostName);
 
             if (isProxyIpAddress.Success)
             {
-                Debug.WriteLine("***Proxy endpoint is IP endpoint");
+                Debug.WriteLine("[PROXY] endpoint is IP endpoint");
             } else { 
-                Debug.WriteLine("***Proxy endpoint is a hostname/DNS endpoint");
+                Debug.WriteLine("[PROXY] endpoint is a hostname/DNS endpoint");
                 isProxyHostname = true;
             }
 
@@ -177,12 +183,61 @@ namespace SuperSocket.ClientEngine.Proxy
             }
             catch (Exception e)
             {
-                OnException(new Exception("Failed to connect proxy server", e));
+                OnException(new Exception("[PROXY] Failed to connect proxy server", e));
             }
+        }
+
+        protected void sendSocketConnectPayload(Socket socket, object targetEndPoint, SocketAsyncEventArgs e)
+        {
+
+            if (e == null)
+                e = new SocketAsyncEventArgs();
+
+            string request;
+            if (targetEndPoint is DnsEndPoint)
+            {
+                var targetDnsEndPoint = (DnsEndPoint)targetEndPoint;
+
+                if (AuthToken != "")
+                {
+                    request = string.Format(m_NTLMRequestTemplate, targetDnsEndPoint.Host, targetDnsEndPoint.Port, AuthToken, userAgent, SecPackageName);
+                }
+                else
+                {
+                    request = string.Format(m_RequestTemplate, targetDnsEndPoint.Host, targetDnsEndPoint.Port, userAgent, SecPackageName);
+                }
+
+            }
+            else
+            {
+                var targetIPEndPoint = (IPEndPoint)targetEndPoint;
+                if (AuthToken != "")
+                {
+                    request = string.Format(m_NTLMRequestTemplate, targetIPEndPoint.Address, targetIPEndPoint.Port, AuthToken, userAgent, SecPackageName);
+                }
+                else
+                {
+                    request = string.Format(m_RequestTemplate, targetIPEndPoint.Address, targetIPEndPoint.Port, userAgent, SecPackageName);
+                }
+            }
+
+            Debug.WriteLine("\r\n[***PROXY REQUEST HEADER START***]:\r\n" + request);
+
+            var requestData = ASCIIEncoding.GetBytes(request);
+
+            Debug.WriteLine("[***PROXY REQUEST HEADER END***]");
+
+            e.Completed += AsyncEventArgsCompleted;
+            e.UserToken = new ConnectContext { Socket = socket, SearchState = new SearchMarkState<byte>(m_LineSeparator) };
+            currentSocket = socket;
+            e.SetBuffer(requestData, 0, requestData.Length);
+
+            StartSend(socket, e);
         }
 
         protected override void ProcessConnect(Socket socket, object targetEndPoint, SocketAsyncEventArgs e, Exception exception)
         {
+
             Debug.WriteLine("ProxyConnect - attempting to connect to proxy");
 
             if (exception != null)
@@ -202,48 +257,10 @@ namespace SuperSocket.ClientEngine.Proxy
                 OnException(new SocketException((int)SocketError.ConnectionAborted));
                 return;
             }
-            
-            if (e == null)
-                e = new SocketAsyncEventArgs();
 
-            if (authNeeded)
-            {
-                setNTLMToken();
-            }
+            sendSocketConnectPayload(socket, targetEndPoint, e);
 
-            string request;
-            if (targetEndPoint is DnsEndPoint)
-            {
-                var targetDnsEndPoint = (DnsEndPoint)targetEndPoint;
 
-                if (authNeeded)
-                {
-
-                    request = string.Format(m_NTLMRequestTemplate, targetDnsEndPoint.Host, targetDnsEndPoint.Port, NTLMToken, userAgent, SecPackageName);
-                } else
-                {
-                    request = string.Format(m_RequestTemplate, targetDnsEndPoint.Host, targetDnsEndPoint.Port, userAgent, SecPackageName);
-                }
-
-            }
-            else
-            {
-                var targetIPEndPoint = (IPEndPoint)targetEndPoint;
-                request = string.Format(m_NTLMRequestTemplate, targetIPEndPoint.Address, targetIPEndPoint.Port, NTLMToken);
-            }
-
-            Debug.WriteLine("PROXY Request:\r\n----------------------------\r\n" + request);
-
-            var requestData = ASCIIEncoding.GetBytes(request);
-
-            Debug.WriteLine("----------------------------\r\n");
-
-            e.Completed += AsyncEventArgsCompleted;
-            e.UserToken = new ConnectContext { Socket = socket, SearchState = new SearchMarkState<byte>(m_LineSeparator) };
-            currentSocket = socket;
-            e.SetBuffer(requestData, 0, requestData.Length);
-
-            StartSend(socket, e);
         }
 
         protected override void ProcessSend(SocketAsyncEventArgs e)
@@ -293,169 +310,68 @@ namespace SuperSocket.ClientEngine.Proxy
             //    return;
             //}
 
+            var responseString = ASCIIEncoding.GetString(e.Buffer, 0, responseLength);
+
             var lineReader = new StringReader(ASCIIEncoding.GetString(e.Buffer, 0, responseLength));
+            
+            var proxyResponse = new HTTPProxyResponseHeader(ASCIIEncoding.GetString(e.Buffer, 0, responseLength));
 
-            var line = lineReader.ReadLine();
-
-            if (string.IsNullOrEmpty(line))
+            //if something went wrong during connect attempt
+            if (proxyResponse.HasError)
             {
-
-                Debug.WriteLine("Proxy: Null String");
-
-                OnException("protocol error: invalid response");
+                Debug.WriteLine("[PROXY CONNECT ERROR] " + proxyResponse.ErrorMessage);
+                OnException(proxyResponse.ErrorMessage);
                 return;
             }
 
-            //HTTP/1.1 2** OK
-            var pos = line.IndexOf(m_Space);
-
-            if (pos <= 0 || line.Length <= (pos + 2))
-            {
-                Debug.WriteLine("Proxy: protocol error invalid response");
-                OnException("protocol error: invalid response");
-                return;
-            }
-
-            var httpProtocol = line.Substring(0, pos);
-
-            if (!m_ResponsePrefix.Equals(httpProtocol))
-            {
-                Debug.WriteLine("Proxy: protocol error invalid protocol");
-                OnException("protocol error: invalid protocol");
-                return;
-            }
-
-            var statusPos = line.IndexOf(m_Space, pos + 1);
-
-            if (statusPos < 0)
-            {
-                Debug.WriteLine("Proxy: protocol error invalid response statusPos < 0");
-                OnException("protocol error: invalid response");
-                return;
-            }
-
-            int statusCode;
-            //Status code should be 2**
-            if (!int.TryParse(line.Substring(pos + 1, statusPos - pos - 1), out statusCode) || (statusCode > 299 || statusCode < 200))
+            if (proxyResponse.AuthNeeded) //we got a 407 so we need to do some kinda handshake
             {
 
-                if (statusCode == 407)
+                if (proxyResponse.ReconnectNeeded)
                 {
-                    if (!authNeeded)
+                    //this is the initial rejected connect attempt which has announced we need to authenticate and told us which security packs it supports.
+
+                    //we chose our preferred auth strategy and set it for the connector class
+                    SecPackageName = proxyResponse.SecurityPackage;
+
+                    //create the nsspi token
+                    var success = createNSSPIToken();
+
+                    if (success)
                     {
-                        authNeeded = true; //flips the flag that we need to authenticate
-
-                        Debug.WriteLine("Proxy authentication required");
-                        Debug.WriteLine("Response:\r\n----------------------------------\r\n");
-
-                        //Possible strategy to determine the proxy SPN is to use the via header
-
-                        while ((line = lineReader.ReadLine()) != null)
-                        {
-                            Debug.WriteLine(line);
-                            var headerParts = line.Split();
-                            if (headerParts[0] == "Via:" && headerParts.Length == 3)
-                            {
-                                
-                                Debug.WriteLine("*** Proxy Via header found. SPN Value: " + headerParts[2]);
-                                ProxyViaHeader = headerParts[2];
-                                
-                            }
-                        }
-
-                        Debug.WriteLine("----------------------------------\r\n");
-
-
+                        //re-connect
                         Connect(lastEndpoint);
-                        return;
                     }
-
-                    Debug.WriteLine("Proxy server requires authentication. Response:");
-                    Debug.WriteLine(line);
-                    while ((line = lineReader.ReadLine()) != null)
-                    {
-                        Debug.WriteLine(line);
-                        var headerParts = line.Split(); //@todo: this should work with Negotiate, NTLM, or Kerberos, should prefer Negotiate, fall back to NTLM/Kerberos
-                        if (headerParts[0] == "Proxy-Authenticate:" && headerParts[1] == SecPackageName && headerParts.Length == 3)
-                        {
-                            Debug.WriteLine("*** Proxy-Authenticate Negotiate response found. Auth Protocol: " + headerParts[1]);
-                            Debug.WriteLine("*** Challange Token: " + headerParts[2]);
-                            NTLMChallangeToken = headerParts[2];
-
-                            setNTLMToken();
-
-                            //Thread.Sleep(5000);
-
-                            //Connect(lastEndpoint);
-
-                            //break;
-
-                        }
-
-                       if (NTLMChallangeToken.Length > 0)
-                        {
-                            Debug.WriteLine("Challange token found. Continuing execution.");
-
-                            e = new SocketAsyncEventArgs();
-                            e.Completed += AsyncEventArgsCompleted;
-                            e.UserToken = new ConnectContext { Socket = currentSocket, SearchState = new SearchMarkState<byte>(m_LineSeparator) };
-
-                            string request;
-                            if (lastEndpoint is DnsEndPoint)
-                            {
-                                var targetDnsEndPoint = (DnsEndPoint)lastEndpoint;
-                               
-                                request = string.Format(m_NTLMRequestTemplate, targetDnsEndPoint.Host, targetDnsEndPoint.Port, NTLMToken, userAgent, SecPackageName);
-                               
-
-                            }
-                            else
-                            {
-                                var targetIPEndPoint = (IPEndPoint)lastEndpoint;
-                                request = string.Format(m_NTLMRequestTemplate, targetIPEndPoint.Address, targetIPEndPoint.Port, NTLMToken);
-                            }
-
-                            Thread.Sleep(500);
-
-                            var requestData = ASCIIEncoding.GetBytes(request);
-
-
-                            Debug.WriteLine("FINAL REQUEST\r\n" + request);
-                            e.SetBuffer(requestData, 0, requestData.Length);
-
-                            Debug.WriteLine("Socket is connected: " + currentSocket.Connected);
-
-                            StartSend(currentSocket, e);
-
-                            //Thread.Sleep(2000);
-
-                            Debug.WriteLine("Socket is connected: " + currentSocket.Connected);
-
-                            //ProcessConnect((ConnectContext)e.UserToken.Socket)
-
-                            return;
-                        }
-
-                    }
-
-                    Debug.WriteLine("Ugghhhhhh");
-
-                    OnException("Proxy authentication failed - did not find challange token.");
                     
-                    return;
+                    return; //exit method
 
-                } else
+                } else if (proxyResponse.HasChallangeToken)
                 {
-                    Debug.WriteLine("Proxy server refused connection. Full Response:");
-                    Debug.WriteLine(line);
-                    Debug.WriteLine(lineReader.ReadToEnd());
-                    OnException("the proxy server refused the connection");
+                    //we have our challange token, which we must not turn into the 3rd token and re-send the "CONNECT" payload while maintaining the same socket connection.
+
+
+                    //create the challange response (final) token
+                    ChallangeToken = proxyResponse.ChallangeToken; //sets the base64 token
+
+
+                    //sets our AuthToken to the stage 3 token
+                    var success = createNSSPIToken();
+
+                    if (success)
+                    {
+                        //re-send the connect payload, this time with the complete NTLM token
+                        sendSocketConnectPayload(context.Socket, lastEndpoint, null);
+                    }
+
+                   
                     return;
                 }
 
-                
+            } else
+            {
+                Debug.WriteLine("Proxy Connection Successful");
             }
-
+           
             OnCompleted(new ProxyEventArgs(context.Socket, TargetHostHame));
         }
     }
