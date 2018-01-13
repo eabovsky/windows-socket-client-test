@@ -97,6 +97,10 @@ namespace ConsoleApp
             socket.Connect();
             socket.Emit("message", () => { }, "test 12345");
 
+            Thread.Sleep(2000);
+
+            socket.Emit("message", () => { }, "test 64578");
+
             Console.ReadLine();
         }
     }

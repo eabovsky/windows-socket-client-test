@@ -28,7 +28,7 @@ namespace SuperSocket.ClientEngine.Proxy
         private string NTLMChallangeToken = "";
 
         private const string m_RequestTemplate = "CONNECT {0}:{1} HTTP/1.1\r\nUser-Agent: {2}\r\nHost: {0}:{1}\r\nProxy-Connection: Keep-Alive\r\n\r\n";
-        private const string m_NTLMRequestTemplate = "CONNECT {0}:{1} HTTP/1.1\r\nUser-Agent: {3}\r\nHost: {0}:{1}\r\nProxy-Authorization: {3} {2}\r\nProxy-Connection: Keep-Alive\r\n\r\n";
+        private const string m_NTLMRequestTemplate = "CONNECT {0}:{1} HTTP/1.1\r\nUser-Agent: {3}\r\nHost: {0}:{1}\r\nProxy-Authorization: {4} {2}\r\nProxy-Connection: Keep-Alive\r\n\r\n";
 
         private bool authNeeded = false;
 
@@ -39,6 +39,7 @@ namespace SuperSocket.ClientEngine.Proxy
         private EndPoint lastEndpoint;
 
         private string ProxyHostName = null;
+        private Socket currentSocket;
 
         private string SecPackageName = "NTLM";
         private byte[] NTLMClientToken = null;
@@ -239,6 +240,7 @@ namespace SuperSocket.ClientEngine.Proxy
 
             e.Completed += AsyncEventArgsCompleted;
             e.UserToken = new ConnectContext { Socket = socket, SearchState = new SearchMarkState<byte>(m_LineSeparator) };
+            currentSocket = socket;
             e.SetBuffer(requestData, 0, requestData.Length);
 
             StartSend(socket, e);
@@ -380,17 +382,63 @@ namespace SuperSocket.ClientEngine.Proxy
                             Debug.WriteLine("*** Challange Token: " + headerParts[2]);
                             NTLMChallangeToken = headerParts[2];
 
+                            setNTLMToken();
+
                             //Thread.Sleep(5000);
 
-                            Connect(lastEndpoint);
+                            //Connect(lastEndpoint);
 
-                            break;
+                            //break;
 
                         }
 
-                       
+                       if (NTLMChallangeToken.Length > 0)
+                        {
+                            Debug.WriteLine("Challange token found. Continuing execution.");
+
+                            e = new SocketAsyncEventArgs();
+                            e.Completed += AsyncEventArgsCompleted;
+                            e.UserToken = new ConnectContext { Socket = currentSocket, SearchState = new SearchMarkState<byte>(m_LineSeparator) };
+
+                            string request;
+                            if (lastEndpoint is DnsEndPoint)
+                            {
+                                var targetDnsEndPoint = (DnsEndPoint)lastEndpoint;
+                               
+                                request = string.Format(m_NTLMRequestTemplate, targetDnsEndPoint.Host, targetDnsEndPoint.Port, NTLMToken, userAgent, SecPackageName);
+                               
+
+                            }
+                            else
+                            {
+                                var targetIPEndPoint = (IPEndPoint)lastEndpoint;
+                                request = string.Format(m_NTLMRequestTemplate, targetIPEndPoint.Address, targetIPEndPoint.Port, NTLMToken);
+                            }
+
+                            Thread.Sleep(500);
+
+                            var requestData = ASCIIEncoding.GetBytes(request);
+
+
+                            Debug.WriteLine("FINAL REQUEST\r\n" + request);
+                            e.SetBuffer(requestData, 0, requestData.Length);
+
+                            Debug.WriteLine("Socket is connected: " + currentSocket.Connected);
+
+                            StartSend(currentSocket, e);
+
+                            //Thread.Sleep(2000);
+
+                            Debug.WriteLine("Socket is connected: " + currentSocket.Connected);
+
+                            //ProcessConnect((ConnectContext)e.UserToken.Socket)
+
+                            return;
+                        }
 
                     }
+
+                    Debug.WriteLine("Ugghhhhhh");
 
                     OnException("Proxy authentication failed - did not find challange token.");
                     
