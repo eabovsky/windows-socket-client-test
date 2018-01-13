@@ -28,7 +28,7 @@ namespace SuperSocket.ClientEngine.Proxy
         private string NTLMChallangeToken = "";
 
         private const string m_RequestTemplate = "CONNECT {0}:{1} HTTP/1.1\r\nUser-Agent: {2}\r\nHost: {0}:{1}\r\nProxy-Connection: Keep-Alive\r\n\r\n";
-        private const string m_NTLMRequestTemplate = "CONNECT {0}:{1} HTTP/1.1\r\nUser-Agent: {3}\r\nHost: {0}:{1}\r\nProxy-Authorization: Negotiate {2}\r\nProxy-Connection: Keep-Alive\r\n\r\n";
+        private const string m_NTLMRequestTemplate = "CONNECT {0}:{1} HTTP/1.1\r\nUser-Agent: {3}\r\nHost: {0}:{1}\r\nProxy-Authorization: {3} {2}\r\nProxy-Connection: Keep-Alive\r\n\r\n";
 
         private bool authNeeded = false;
 
@@ -40,6 +40,7 @@ namespace SuperSocket.ClientEngine.Proxy
 
         private string ProxyHostName = null;
 
+        private string SecPackageName = "NTLM";
         private byte[] NTLMClientToken = null;
         private byte[] serverToken = null;
         private ClientCurrentCredential NSSPIclientCred;
@@ -58,17 +59,6 @@ namespace SuperSocket.ClientEngine.Proxy
 
         private int m_ReceiveBufferSize;
 
-        /*
-         * 
-         * 
-        public HttpConnectProxy(EndPoint proxyEndPoint)
-            : this(proxyEndPoint, 8192, null)
-        {
-
-        }
-
-        */
-
         private void initNTLMClientAuth()
         {
             //singleton init
@@ -81,7 +71,7 @@ namespace SuperSocket.ClientEngine.Proxy
 
             //ProxySPN = iplookup.HostName;
 
-            var packageName = "Negotiate";
+            var packageName = SecPackageName;
             NSSPIclientCred = new ClientCurrentCredential(packageName);
 
             Debug.WriteLine("NSSPI Client Auth Principle: " + NSSPIclientCred.PrincipleName);
@@ -228,10 +218,10 @@ namespace SuperSocket.ClientEngine.Proxy
                 if (authNeeded)
                 {
 
-                    request = string.Format(m_NTLMRequestTemplate, targetDnsEndPoint.Host, targetDnsEndPoint.Port, NTLMToken, userAgent);
+                    request = string.Format(m_NTLMRequestTemplate, targetDnsEndPoint.Host, targetDnsEndPoint.Port, NTLMToken, userAgent, SecPackageName);
                 } else
                 {
-                    request = string.Format(m_RequestTemplate, targetDnsEndPoint.Host, targetDnsEndPoint.Port, userAgent);
+                    request = string.Format(m_RequestTemplate, targetDnsEndPoint.Host, targetDnsEndPoint.Port, userAgent, SecPackageName);
                 }
 
             }
@@ -384,7 +374,7 @@ namespace SuperSocket.ClientEngine.Proxy
                     {
                         Debug.WriteLine(line);
                         var headerParts = line.Split(); //@todo: this should work with Negotiate, NTLM, or Kerberos, should prefer Negotiate, fall back to NTLM/Kerberos
-                        if (headerParts[0] == "Proxy-Authenticate:" && headerParts[1] == "Negotiate" && headerParts.Length == 3)
+                        if (headerParts[0] == "Proxy-Authenticate:" && headerParts[1] == SecPackageName && headerParts.Length == 3)
                         {
                             Debug.WriteLine("*** Proxy-Authenticate Negotiate response found. Auth Protocol: " + headerParts[1]);
                             Debug.WriteLine("*** Challange Token: " + headerParts[2]);
